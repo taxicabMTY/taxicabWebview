@@ -1,0 +1,87 @@
+{
+  "project_info": {
+    "project_number": "324522466341",
+    "firebase_url": "https://taxicab-a92b9-default-rtdb.firebaseio.com",
+    "project_id": "taxicab-a92b9",
+    "storage_bucket": "taxicab-a92b9.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:324522466341:android:20b5288073cbe862cbb3cc",
+        "android_client_info": {
+          "package_name": "com.ex"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3FshQngUkEUII0z_FHcj6dmGW80_PCXU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:324522466341:android:4d7ae11d2aca39f2cbb3cc",
+        "android_client_info": {
+          "package_name": "com.example.myapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3FshQngUkEUII0z_FHcj6dmGW80_PCXU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:324522466341:android:289b81c01f3b5a21cbb3cc",
+        "android_client_info": {
+          "package_name": "com.kaitekianzen.taxicab_viewer"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3FshQngUkEUII0z_FHcj6dmGW80_PCXU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:324522466341:android:ebb4dceb86665055cbb3cc",
+        "android_client_info": {
+          "package_name": "mx.taxicab"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3FshQngUkEUII0z_FHcj6dmGW80_PCXU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
