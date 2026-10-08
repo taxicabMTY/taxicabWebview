@@ -29,6 +29,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
+import 'alarm_policy.dart';
 import 'battery_optimization_permission.dart';
 import 'full_screen_intent_permission.dart';
 
@@ -76,12 +77,20 @@ class RouteAlarmService {
   final Set<int> _scheduledAlarmIds = {};
   final Set<int> _scheduledNotificationIds = {};
   bool _initialized = false;
+
+  /// Si en esta ejecución ya se mandó al chofer a pantallas de ajustes.
+  bool _ajustesYaPedidos = false;
   tz.Location? _location;
 
   /// Inicializa el plugin de notificaciones locales y la base de zonas
   /// horarias. Idempotente (la parte cara, crear canales, solo corre una
   /// vez). Debe llamarse una vez al arrancar la app.
-  Future<void> init() async {
+  ///
+  /// [abrirAjustes] permite mandar al chofer a pantallas de ajustes del
+  /// sistema para pedirle permisos especiales. Solo se hace una vez por
+  /// ejecución y nunca mientras suena una alarma (ver [puedeAbrirAjustes]).
+  /// El aviso push en segundo plano lo pasa en `false`: ahí no hay pantalla.
+  Future<void> init({bool abrirAjustes = true}) async {
     if (kIsWeb) return;
     if (!_initialized) {
       _initialized = true;
@@ -89,15 +98,17 @@ class RouteAlarmService {
         tzdata.initializeTimeZones();
         _location = tz.getLocation(_timeZone);
 
-        const androidInit =
-            AndroidInitializationSettings('@mipmap/ic_launcher');
+        const androidInit = AndroidInitializationSettings(
+          '@mipmap/ic_launcher',
+        );
         await _notifications.initialize(
           settings: const InitializationSettings(android: androidInit),
         );
 
-        final androidImpl =
-            _notifications.resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin>();
+        final androidImpl = _notifications
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >();
         if (androidImpl != null) {
           await androidImpl.createNotificationChannel(
             const AndroidNotificationChannel(
@@ -111,7 +122,8 @@ class RouteAlarmService {
             const AndroidNotificationChannel(
               hardAlarmChannelId,
               'Alarma de ruta (respaldo del servidor)',
-              description: 'Aviso fuerte 15 minutos antes del inicio de la '
+              description:
+                  'Aviso fuerte 15 minutos antes del inicio de la '
                   'ruta, por si la app no pudo programar la alarma completa.',
               importance: Importance.max,
               playSound: true,
@@ -124,22 +136,44 @@ class RouteAlarmService {
         debugPrint('RouteAlarmService.init error: $e');
       }
     }
-    await _ensurePermissions();
+    await _ensurePermissions(abrirAjustes: abrirAjustes);
+  }
+
+  /// Se llama cada vez que el chofer vuelve a la app. Revisa los permisos
+  /// normales, pero NO abre pantallas de ajustes: antes lo hacía en cada
+  /// regreso, y si el chofer volvía a la app justo para apagar una alarma, le
+  /// caía encima una pantalla de ajustes que tapaba el botón "Detener".
+  Future<void> alVolverALaApp() async {
+    if (kIsWeb) return;
+    if (!_initialized) {
+      await init();
+      return;
+    }
+    await _ensurePermissions(abrirAjustes: false);
   }
 
   /// Revisa (y, si falta, vuelve a pedir) los permisos de los que depende
-  /// que la alarma realmente se vea y suene. A diferencia de la creación
-  /// de canales, esto NO es de una sola vez: si el chofer ignoró o negó
-  /// alguno la primera vez, se le vuelve a pedir cada vez que la app
-  /// sincroniza rutas — de lo contrario se queda sin ninguno de estos para
-  /// siempre y la alarma suena sin nada visible con qué apagarla.
-  Future<void> _ensurePermissions() async {
+  /// que la alarma realmente se vea y suene. Los diálogos normales (notificaciones)
+  /// se piden siempre que falten; las pantallas de ajustes del sistema solo si
+  /// [abrirAjustes] y [puedeAbrirAjustes] lo permiten.
+  Future<void> _ensurePermissions({required bool abrirAjustes}) async {
     try {
-      final androidImpl = _notifications.resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>();
+      final androidImpl = _notifications
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
       // Sin esto no aparece NI SIQUIERA la notificación con el botón
       // "Detener" — solo el sonido, sin nada visible para pararlo.
       await androidImpl?.requestNotificationsPermission();
+
+      final abrir =
+          abrirAjustes &&
+          puedeAbrirAjustes(
+            yaSePidioEnEstaEjecucion: _ajustesYaPedidos,
+            hayAlarmaSonando: Alarm.ringing.value.alarms.isNotEmpty,
+          );
+      if (!abrir) return;
+      _ajustesYaPedidos = true;
 
       // Android 12+ requiere este permiso especial (aparte del de
       // notificaciones) para que las alarmas/notificaciones programadas
@@ -170,16 +204,39 @@ class RouteAlarmService {
 
   /// [routes] es una lista de mapas con: id (String), ruta (String),
   /// estado (String), dia ("YYYY-MM-DD"), hora ("HH:mm" o null).
-  Future<void> syncAlarms(List<Map<String, dynamic>> routes) async {
+  ///
+  /// Con [soloAgregar] solo se programan las rutas recibidas y no se cancela
+  /// nada más: es lo que se usa cuando llega el aviso push de UNA ruta, que no
+  /// es la lista completa de hoy.
+  Future<void> syncAlarms(
+    List<Map<String, dynamic>> routes, {
+    bool soloAgregar = false,
+  }) async {
     if (kIsWeb) return;
     if (!_initialized) await init();
 
     debugPrint(
-        '[RouteAlarmService] syncAlarms: ${routes.length} rutas recibidas');
+      '[RouteAlarmService] syncAlarms: ${routes.length} rutas recibidas',
+    );
 
-    final now = DateTime.now();
-    final desiredAlarms = <int, _AlarmPlan>{};
-    final desiredNotifications = <int, _AlarmPlan>{};
+    final plan = planificar(routes, DateTime.now());
+
+    debugPrint(
+      '[RouteAlarmService] programando ${plan.alarmas.length} '
+      'alarma(s) y ${plan.notificaciones.length} notificación(es)',
+    );
+
+    await _syncAlarmSet(plan.alarmas, soloAgregar: soloAgregar);
+    await _syncNotificationSet(plan.notificaciones, soloAgregar: soloAgregar);
+  }
+
+  /// Qué alarmas y notificaciones corresponden a [routes] en el instante
+  /// [now]. Es pura (no toca el sistema) para poder probarla.
+  @visibleForTesting
+  static ({Map<int, PlanRuta> alarmas, Map<int, PlanRuta> notificaciones})
+  planificar(List<Map<String, dynamic>> routes, DateTime now) {
+    final alarmas = <int, PlanRuta>{};
+    final notificaciones = <int, PlanRuta>{};
 
     for (final route in routes) {
       final estado = (route['estado'] as String? ?? '').toLowerCase();
@@ -205,33 +262,51 @@ class RouteAlarmService {
       final alarmTime = start.subtract(alarmLead);
       if (start.isAfter(now)) {
         final ringAt = alarmTime.isAfter(now) ? alarmTime : now;
-        desiredAlarms[_alarmId(id)] =
-            _AlarmPlan(routeName: routeName, ring: ringAt, start: start);
+        alarmas[_alarmId(id)] = PlanRuta(
+          routeName: routeName,
+          ring: ringAt,
+          start: start,
+        );
       }
 
       final notifTime = start.subtract(notificationLead);
       if (notifTime.isAfter(now)) {
-        desiredNotifications[_notificationId(id)] =
-            _AlarmPlan(routeName: routeName, ring: notifTime, start: start);
+        notificaciones[_notificationId(id)] = PlanRuta(
+          routeName: routeName,
+          ring: notifTime,
+          start: start,
+        );
       }
     }
-
-    debugPrint('[RouteAlarmService] programando ${desiredAlarms.length} '
-        'alarma(s) y ${desiredNotifications.length} notificación(es)');
-
-    await _syncAlarmSet(desiredAlarms);
-    await _syncNotificationSet(desiredNotifications);
+    return (alarmas: alarmas, notificaciones: notificaciones);
   }
 
-  Future<void> _syncAlarmSet(Map<int, _AlarmPlan> desired) async {
+  Future<void> _syncAlarmSet(
+    Map<int, PlanRuta> desired, {
+    bool soloAgregar = false,
+  }) async {
     // Una alarma cuya hora ya pasó no siempre es obsoleta: puede estar
     // sonando en este momento (su ventana ya se cumplió). No la toques —
     // solo el botón "Detener" o el propio paquete deben apagarla.
     final ringingIds = Alarm.ringing.value.alarms.map((a) => a.id).toSet();
 
-    final toCancel = _scheduledAlarmIds
-        .difference(desired.keys.toSet())
-        .difference(ringingIds);
+    // Se compara contra lo que el sistema tiene programado de verdad, no
+    // contra lo que esta ejecución recuerda en memoria: tras reiniciar la app
+    // la memoria está vacía, y una alarma de una ruta ya cancelada o
+    // reasignada nunca se cancelaba y sonaba igual.
+    Iterable<int> guardadas = _scheduledAlarmIds;
+    try {
+      guardadas = (await Alarm.getAlarms()).map((a) => a.id);
+    } catch (e) {
+      debugPrint('RouteAlarmService: no se pudieron leer las alarmas: $e');
+    }
+
+    final toCancel = idsACancelar(
+      guardadas: guardadas,
+      deseadas: desired.keys,
+      sonando: ringingIds,
+      soloAgregar: soloAgregar,
+    );
     for (final id in toCancel) {
       try {
         await Alarm.stop(id);
@@ -261,7 +336,8 @@ class RouteAlarmService {
             ),
             notificationSettings: NotificationSettings(
               title: 'Ruta a punto de comenzar',
-              body: 'Debes estar en el punto de inicio de '
+              body:
+                  'Debes estar en el punto de inicio de '
                   '"${plan.routeName}" ahora mismo.',
               stopButton: 'Detener',
             ),
@@ -274,9 +350,26 @@ class RouteAlarmService {
     }
   }
 
-  Future<void> _syncNotificationSet(Map<int, _AlarmPlan> desired) async {
-    final toCancel =
-        _scheduledNotificationIds.difference(desired.keys.toSet());
+  Future<void> _syncNotificationSet(
+    Map<int, PlanRuta> desired, {
+    bool soloAgregar = false,
+  }) async {
+    // Igual que con las alarmas: se compara contra lo que el sistema tiene
+    // pendiente, no contra la memoria de esta ejecución.
+    Iterable<int> pendientes = _scheduledNotificationIds;
+    try {
+      pendientes = (await _notifications.pendingNotificationRequests()).map(
+        (n) => n.id,
+      );
+    } catch (e) {
+      debugPrint('RouteAlarmService: no se pudieron leer los avisos: $e');
+    }
+
+    final toCancel = idsACancelar(
+      guardadas: pendientes,
+      deseadas: desired.keys,
+      soloAgregar: soloAgregar,
+    );
     for (final id in toCancel) {
       try {
         await _notifications.cancel(id: id);
@@ -309,7 +402,8 @@ class RouteAlarmService {
         await _notifications.zonedSchedule(
           id: id,
           title: 'Ruta en 30 minutos',
-          body: 'Tu ruta "${plan.routeName}" es a las $hora. Debes '
+          body:
+              'Tu ruta "${plan.routeName}" es a las $hora. Debes '
               'estar en el punto de inicio en 15 minutos.',
           scheduledDate: scheduled,
           notificationDetails: const NotificationDetails(
@@ -353,7 +447,8 @@ class RouteAlarmService {
       await _notifications.cancelAll();
     } catch (e) {
       debugPrint(
-          'RouteAlarmService.cancelAll: error cancelando notificaciones: $e');
+        'RouteAlarmService.cancelAll: error cancelando notificaciones: $e',
+      );
     }
     _scheduledAlarmIds.clear();
     _scheduledNotificationIds.clear();
@@ -362,7 +457,7 @@ class RouteAlarmService {
   /// Combina la fecha real de la ruta (`scheduleDate`) con la hora
   /// (`startTime`, que solo trae hora/minuto válidos — su fecha es un
   /// placeholder de RouteModel) para obtener el instante real de inicio.
-  DateTime? _startDateTime(Map<String, dynamic> route) {
+  static DateTime? _startDateTime(Map<String, dynamic> route) {
     final dia = route['dia'] as String?;
     final hora = route['hora'] as String?;
     if (dia == null || hora == null) return null;
@@ -382,11 +477,11 @@ class RouteAlarmService {
     }
   }
 
-  int _alarmId(String scheduleId) => _fnv1a(scheduleId) & 0x3fffffff;
-  int _notificationId(String scheduleId) =>
+  static int _alarmId(String scheduleId) => _fnv1a(scheduleId) & 0x3fffffff;
+  static int _notificationId(String scheduleId) =>
       (_fnv1a(scheduleId) & 0x3fffffff) | 0x40000000;
 
-  int _fnv1a(String input) {
+  static int _fnv1a(String input) {
     var hash = 0x811c9dc5;
     for (final codeUnit in input.codeUnits) {
       hash ^= codeUnit;
@@ -396,9 +491,14 @@ class RouteAlarmService {
   }
 }
 
-class _AlarmPlan {
+/// Lo que hay que programar para una ruta: cuándo suena y cuándo arranca.
+class PlanRuta {
   final String routeName;
   final DateTime ring;
   final DateTime start;
-  _AlarmPlan({required this.routeName, required this.ring, required this.start});
+  const PlanRuta({
+    required this.routeName,
+    required this.ring,
+    required this.start,
+  });
 }
