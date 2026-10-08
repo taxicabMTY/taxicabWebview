@@ -11,6 +11,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 
+import 'services/alarm_policy.dart';
+import 'services/push_owner_store.dart';
 import 'services/route_alarm_service.dart';
 import 'widgets/alarm_ring_overlay.dart';
 
@@ -49,7 +51,18 @@ Future<void> _handleRouteReminderMessage(RemoteMessage message) async {
   final type = message.data['type'];
   if (type != 'route_reminder_30' && type != 'route_reminder_15') return;
   try {
-    await RouteAlarmService().init();
+    // Un teléfono que usaron dos personas puede recibir el aviso de la ruta de
+    // la otra. Si el aviso dice de quién es y no es de quien usa el teléfono
+    // ahora, no se programa su alarma.
+    final dueno = await PushOwnerStore().read();
+    if (!avisoEsParaEsteChofer(
+      choferDelAviso: message.data['choferId'] as String?,
+      choferRegistrado: dueno?.choferId,
+    )) {
+      return;
+    }
+    // Sin pantallas de ajustes: esto puede correr en segundo plano.
+    await RouteAlarmService().init(abrirAjustes: false);
     final route = {
       'id': message.data['scheduleId'],
       'ruta': message.data['ruta'],
@@ -57,7 +70,9 @@ Future<void> _handleRouteReminderMessage(RemoteMessage message) async {
       'dia': message.data['dia'],
       'hora': message.data['hora'],
     };
-    await RouteAlarmService().syncAlarms([route]);
+    // Es el aviso de UNA ruta, no la lista completa de hoy: se agrega sin
+    // cancelar las alarmas de las demás.
+    await RouteAlarmService().syncAlarms([route], soloAgregar: true);
   } catch (e) {
     debugPrint('Error procesando push de recordatorio: $e');
   }
@@ -142,13 +157,12 @@ class _WebViewScreenState extends State<WebViewScreen> with WidgetsBindingObserv
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Si el chofer ignoró o negó el permiso de pantalla completa / batería
-    // la primera vez, cada vez que vuelve a la app (p. ej. después de que
-    // le suene la alarma sin nada visible con qué apagarla, y la abra a
-    // mano) se lo volvemos a pedir — de lo contrario se queda sin esos
-    // permisos para siempre y el problema nunca se corrige solo.
+    // Al volver a la app solo se revisan los permisos normales. Los ajustes
+    // especiales (pantalla completa, batería) se piden una vez al abrir la
+    // app y nunca mientras suena una alarma.
     if (state == AppLifecycleState.resumed) {
-      RouteAlarmService().init();
+      // No abre pantallas de ajustes: taparían el botón de apagar la alarma.
+      RouteAlarmService().alVolverALaApp();
     }
   }
 
@@ -294,22 +308,34 @@ class _WebViewScreenState extends State<WebViewScreen> with WidgetsBindingObserv
     debugPrint('[TaxiCabNative] logout recibido, cancelando alarmas');
     await RouteAlarmService().cancelAll();
 
-    final choferId = (decoded['choferId'] as String?) ?? _registeredChoferId;
-    final token = _lastFcmToken;
+    // Lo recordado en el teléfono cubre el caso en que la app se reinició
+    // desde el registro: sin eso no se sabía qué token dar de baja.
+    final guardado = await PushOwnerStore().read();
+    final choferId = (decoded['choferId'] as String?) ??
+        _registeredChoferId ??
+        guardado?.choferId;
+    final token = _lastFcmToken ?? guardado?.token;
     if (choferId != null && choferId.isNotEmpty && token != null) {
-      try {
-        await FirebaseFunctions.instance
-            .httpsCallable('unregisterChoferFcmToken')
-            .call({'choferId': choferId, 'fcmToken': token});
-        debugPrint('Token FCM dado de baja para $choferId');
-      } catch (e) {
-        debugPrint('Error dando de baja el token FCM: $e');
-      }
+      await _darDeBajaToken(choferId, token);
     }
+    await PushOwnerStore().clear();
 
     _registeredChoferId = null;
     _lastIdToken = null;
     _lastFcmToken = null;
+  }
+
+  /// Da de baja [fcmToken] de [choferId] en el servidor para que deje de
+  /// mandarle a este teléfono los avisos de esa cuenta.
+  Future<void> _darDeBajaToken(String choferId, String fcmToken) async {
+    try {
+      await FirebaseFunctions.instance
+          .httpsCallable('unregisterChoferFcmToken')
+          .call({'choferId': choferId, 'fcmToken': fcmToken});
+      debugPrint('Token FCM dado de baja para $choferId');
+    } catch (e) {
+      debugPrint('Error dando de baja el token FCM: $e');
+    }
   }
 
   Future<void> _registerFcmToken(String choferId, String idToken) async {
@@ -317,6 +343,17 @@ class _WebViewScreenState extends State<WebViewScreen> with WidgetsBindingObserv
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null) return;
       _lastIdToken = idToken;
+
+      // Si este teléfono lo usaba otra cuenta, se le da de baja antes de
+      // registrar la nueva; si no, los avisos de esa otra persona seguirían
+      // sonando aquí. Se sabe gracias a que se recuerda en el teléfono.
+      final anterior = await PushOwnerStore().read();
+      if (decidirRegistro(guardado: anterior, choferNuevo: choferId) ==
+              AccionRegistroPush.darDeBajaAnteriorYRegistrar &&
+          anterior != null) {
+        await _darDeBajaToken(anterior.choferId, anterior.token);
+      }
+
       await _sendTokenToServer(choferId, idToken, token);
     } catch (e) {
       debugPrint('Error obteniendo token FCM: $e');
@@ -340,6 +377,8 @@ class _WebViewScreenState extends State<WebViewScreen> with WidgetsBindingObserv
         'fcmToken': fcmToken,
       });
       _lastFcmToken = fcmToken;
+      await PushOwnerStore()
+          .write(DuenoPush(choferId: choferId, token: fcmToken));
       debugPrint('Token FCM registrado para $choferId');
     } catch (e) {
       debugPrint('Error registrando token FCM: $e');
