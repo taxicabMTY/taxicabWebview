@@ -121,11 +121,25 @@ void main() {
       );
     });
 
-    test('si la app no sabe quién usa el teléfono, se acepta', () {
+    test('si el teléfono ya no tiene cuenta (cerró sesión), el aviso con dueño se ignora', () {
       expect(
         avisoEsParaEsteChofer(choferDelAviso: 'ana', choferRegistrado: null),
-        isTrue,
+        isFalse,
+      );
+      expect(
+        avisoEsParaEsteChofer(choferDelAviso: 'ana', choferRegistrado: ''),
+        isFalse,
       );
     });
+
+    test(
+      'sin cuenta en el teléfono, un aviso que no dice de quién es se acepta',
+      () {
+        expect(
+          avisoEsParaEsteChofer(choferDelAviso: null, choferRegistrado: null),
+          isTrue,
+        );
+      },
+    );
   });
 }

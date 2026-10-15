@@ -70,14 +70,21 @@ AccionRegistroPush decidirRegistro({
 
 /// Si un aviso push es para la cuenta que usa este teléfono ahora.
 ///
-/// Si el aviso no dice a quién va (así son los del servidor de hoy) o la app
-/// no sabe quién lo usa, se acepta. Si ambos datos existen y no coinciden, es
-/// de otra persona y se ignora.
+/// Si el aviso no dice a quién va (así eran los del servidor antes), se acepta.
+/// Si dice a quién va y la app sabe quién usa el teléfono, solo se acepta si
+/// coinciden.
+///
+/// Si dice a quién va pero este teléfono ya no tiene ninguna cuenta (se cerró
+/// sesión), se ignora: ese aviso es de la cuenta anterior y no hay a quién
+/// despertar. Antes se aceptaba, y por eso una alarma de la cuenta anterior
+/// podía seguir sonando después de cerrar sesión. Un teléfono sin cuenta no
+/// recibe avisos legítimos: el servidor solo avisa a tokens ya registrados, y
+/// registrar guarda la cuenta aquí mismo.
 bool avisoEsParaEsteChofer({
   required String? choferDelAviso,
   required String? choferRegistrado,
 }) {
   if (choferDelAviso == null || choferDelAviso.isEmpty) return true;
-  if (choferRegistrado == null || choferRegistrado.isEmpty) return true;
+  if (choferRegistrado == null || choferRegistrado.isEmpty) return false;
   return choferDelAviso == choferRegistrado;
 }

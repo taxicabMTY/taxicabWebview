@@ -19,7 +19,14 @@ import 'widgets/alarm_ring_overlay.dart';
 /// URL del sitio hosteado en Firebase Hosting. Cada `firebase deploy
 /// --only hosting` a este destino actualiza el contenido dentro de la app
 /// al instante, sin publicar una nueva versión en las tiendas.
-const String kHomeUrl = 'https://taxicab-a92b9.web.app/';
+///
+/// Por omisión es producción. Para probar contra el sitio de pruebas se
+/// compila con `--dart-define=HOME_URL=https://cabtaxi-ba7f1.web.app/`; un
+/// build de tienda nunca pasa esa bandera.
+const String kHomeUrl = String.fromEnvironment(
+  'HOME_URL',
+  defaultValue: 'https://taxicab-a92b9.web.app/',
+);
 
 /// Nombre del canal JavaScript que la página web usa para mandarle las
 /// rutas de hoy del chofer a este app nativo (ver
