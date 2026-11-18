@@ -21,6 +21,12 @@ import 'widgets/alarm_ring_overlay.dart';
 /// al instante, sin publicar una nueva versión en las tiendas.
 const String kHomeUrl = 'https://taxicab-a92b9.web.app/';
 
+/// Lado largo máximo, en píxeles, de las fotos que la página pide a la cámara
+/// o a la galería, y calidad JPEG con la que se guardan. Ver
+/// `_onShowFileSelector`.
+const double kFotoLadoMaximo = 1600;
+const int kFotoCalidad = 80;
+
 /// Nombre del canal JavaScript que la página web usa para mandarle las
 /// rutas de hoy del chofer a este app nativo (ver
 /// lib/features/chofer/chofer_routes/data/services/web_alarm_bridge_web.dart
@@ -406,18 +412,37 @@ class _WebViewScreenState extends State<WebViewScreen> with WidgetsBindingObserv
       if (!granted) return <String>[];
     }
 
-    if (params.mode == FileSelectorMode.openMultiple &&
-        source == ImageSource.gallery) {
-      final photos = await ImagePicker().pickMultiImage(imageQuality: 85);
-      return photos.map((f) => _toFileUri(f.path)).toList();
-    }
+    // La foto se reduce AQUÍ, antes de dárselo a la página: una foto de cámara
+    // sin límite pesa varios MB y miles de píxeles de ancho, y la página web
+    // la decodifica en el WebView. En teléfonos con poca memoria eso tumba el
+    // proceso del WebView y Android cierra la app entera: el chofer ve que
+    // "se reinicia" justo al volver de la cámara. Un tope de lado largo la
+    // deja legible (tickets, documentos) y en una fracción del tamaño.
+    try {
+      if (params.mode == FileSelectorMode.openMultiple &&
+          source == ImageSource.gallery) {
+        final photos = await ImagePicker().pickMultiImage(
+          maxWidth: kFotoLadoMaximo,
+          maxHeight: kFotoLadoMaximo,
+          imageQuality: kFotoCalidad,
+        );
+        return photos.map((f) => _toFileUri(f.path)).toList();
+      }
 
-    final photo = await ImagePicker().pickImage(
-      source: source,
-      imageQuality: 85,
-    );
-    if (photo == null) return <String>[];
-    return <String>[_toFileUri(photo.path)];
+      final photo = await ImagePicker().pickImage(
+        source: source,
+        maxWidth: kFotoLadoMaximo,
+        maxHeight: kFotoLadoMaximo,
+        imageQuality: kFotoCalidad,
+      );
+      if (photo == null) return <String>[];
+      return <String>[_toFileUri(photo.path)];
+    } catch (e) {
+      // Sin cámara disponible o cámara interrumpida: la página recibe "nada
+      // elegido" en vez de que la excepción llegue hasta el WebView.
+      debugPrint('Selector de archivos: $e');
+      return <String>[];
+    }
   }
 
   String _toFileUri(String path) => Uri.file(path).toString();
